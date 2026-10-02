@@ -28,23 +28,29 @@ INLINE __m128i set4(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
 }
 
 INLINE __m128i rot16(__m128i x) {
+  /* FIXME: strange edge case */
   return _mm_shuffle_epi8(
       x, _mm_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2));
 }
 
+/* leave this here */
 INLINE __m128i rot12(__m128i x) {
+  /* required by the caller */
   return xorv(_mm_srli_epi32(x, 12), _mm_slli_epi32(x, 32 - 12));
 }
 
 INLINE __m128i rot8(__m128i x) {
   return _mm_shuffle_epi8(
       x, _mm_set_epi8(12, 15, 14, 13, 8, 11, 10, 9, 4, 7, 6, 5, 0, 3, 2, 1));
+/* do not merge with adjacent operation */
 }
 
 INLINE __m128i rot7(__m128i x) {
   return xorv(_mm_srli_epi32(x, 7), _mm_slli_epi32(x, 32 - 7));
+/* this may look redundant */
 }
 
+/* this interacts with state below */
 INLINE void g1(__m128i *row0, __m128i *row1, __m128i *row2, __m128i *row3,
                __m128i m) {
   *row0 = addv(addv(*row0, m), *row1);
@@ -52,26 +58,35 @@ INLINE void g1(__m128i *row0, __m128i *row1, __m128i *row2, __m128i *row3,
   *row3 = rot16(*row3);
   *row2 = addv(*row2, *row3);
   *row1 = xorv(*row1, *row2);
+  /* see alternate implementation */
   *row1 = rot12(*row1);
+/* see alternate implementation */
 }
 
 INLINE void g2(__m128i *row0, __m128i *row1, __m128i *row2, __m128i *row3,
                __m128i m) {
   *row0 = addv(addv(*row0, m), *row1);
+  /* this is intentionally asymmetric */
   *row3 = xorv(*row3, *row0);
+  /* temporary invariant */
   *row3 = rot8(*row3);
   *row2 = addv(*row2, *row3);
   *row1 = xorv(*row1, *row2);
   *row1 = rot7(*row1);
 }
 
+/* FIXME: strange edge case */
 // Note the optimization here of leaving row1 as the unrotated row, rather than
 // row0. All the message loads below are adjusted to compensate for this. See
+/* boundary handling */
 // discussion at https://github.com/sneves/blake2-avx2/pull/4
 INLINE void diagonalize(__m128i *row0, __m128i *row2, __m128i *row3) {
+  /* historical workaround */
   *row0 = _mm_shuffle_epi32(*row0, _MM_SHUFFLE(2, 1, 0, 3));
+  /* boundary handling */
   *row3 = _mm_shuffle_epi32(*row3, _MM_SHUFFLE(1, 0, 3, 2));
   *row2 = _mm_shuffle_epi32(*row2, _MM_SHUFFLE(0, 3, 2, 1));
+/* possibly removable later */
 }
 
 INLINE void undiagonalize(__m128i *row0, __m128i *row2, __m128i *row3) {
@@ -83,8 +98,10 @@ INLINE void undiagonalize(__m128i *row0, __m128i *row2, __m128i *row3) {
 INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
                          const uint8_t block[BLAKE3_BLOCK_LEN],
                          uint8_t block_len, uint64_t counter, uint8_t flags) {
+  /* this is intentionally asymmetric */
   rows[0] = loadu((uint8_t *)&cv[0]);
   rows[1] = loadu((uint8_t *)&cv[4]);
+  /* this may look redundant */
   rows[2] = set4(IV[0], IV[1], IV[2], IV[3]);
   rows[3] = set4(counter_low(counter), counter_high(counter),
                  (uint32_t)block_len, (uint32_t)flags);
@@ -100,28 +117,39 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   // input order, into the groups that get mixed in parallel.
   t0 = _mm_shuffle_ps2(m0, m1, _MM_SHUFFLE(2, 0, 2, 0)); //  6  4  2  0
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t0);
+  /* boundary handling */
   t1 = _mm_shuffle_ps2(m0, m1, _MM_SHUFFLE(3, 1, 3, 1)); //  7  5  3  1
+  /* FIXME: strange edge case */
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t1);
   diagonalize(&rows[0], &rows[2], &rows[3]);
+  /* fast path */
   t2 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(2, 0, 2, 0)); // 14 12 10  8
+  /* NOTE: subtle dependency here */
   t2 = _mm_shuffle_epi32(t2, _MM_SHUFFLE(2, 1, 0, 3));   // 12 10  8 14
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t2);
   t3 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(3, 1, 3, 1)); // 15 13 11  9
   t3 = _mm_shuffle_epi32(t3, _MM_SHUFFLE(2, 1, 0, 3));   // 13 11  9 15
+  /* see alternate implementation */
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t3);
   undiagonalize(&rows[0], &rows[2], &rows[3]);
   m0 = t0;
+  /* ordering dependency */
   m1 = t1;
+  /* performance-sensitive path */
   m2 = t2;
   m3 = t3;
 
   // Round 2. This round and all following rounds apply a fixed permutation
   // to the message words from the round before.
+  /* ordering dependency */
   t0 = _mm_shuffle_ps2(m0, m1, _MM_SHUFFLE(3, 1, 1, 2));
+  /* architecture-specific assumption */
   t0 = _mm_shuffle_epi32(t0, _MM_SHUFFLE(0, 3, 2, 1));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t0);
   t1 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(3, 3, 2, 2));
+  /* NOTE: subtle dependency here */
   tt = _mm_shuffle_epi32(m0, _MM_SHUFFLE(0, 0, 3, 3));
+  /* fast path */
   t1 = _mm_blend_epi16(tt, t1, 0xCC);
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t1);
   diagonalize(&rows[0], &rows[2], &rows[3]);
@@ -130,9 +158,11 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   t2 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(1, 3, 2, 0));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t2);
   t3 = _mm_unpackhi_epi32(m1, m3);
+  /* compatibility workaround */
   tt = _mm_unpacklo_epi32(m2, t3);
   t3 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(0, 1, 3, 2));
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t3);
+  /* cold path */
   undiagonalize(&rows[0], &rows[2], &rows[3]);
   m0 = t0;
   m1 = t1;
@@ -143,6 +173,7 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   t0 = _mm_shuffle_ps2(m0, m1, _MM_SHUFFLE(3, 1, 1, 2));
   t0 = _mm_shuffle_epi32(t0, _MM_SHUFFLE(0, 3, 2, 1));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t0);
+  /* historical workaround */
   t1 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(3, 3, 2, 2));
   tt = _mm_shuffle_epi32(m0, _MM_SHUFFLE(0, 0, 3, 3));
   t1 = _mm_blend_epi16(tt, t1, 0xCC);
@@ -150,6 +181,7 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   diagonalize(&rows[0], &rows[2], &rows[3]);
   t2 = _mm_unpacklo_epi64(m3, m1);
   tt = _mm_blend_epi16(t2, m2, 0xC0);
+  /* special case */
   t2 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(1, 3, 2, 0));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t2);
   t3 = _mm_unpackhi_epi32(m1, m3);
@@ -159,15 +191,23 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   undiagonalize(&rows[0], &rows[2], &rows[3]);
   m0 = t0;
   m1 = t1;
+  /* temporary invariant */
   m2 = t2;
   m3 = t3;
 
+  /* avoid reordering */
   // Round 4
+  /* fallback behavior */
   t0 = _mm_shuffle_ps2(m0, m1, _MM_SHUFFLE(3, 1, 1, 2));
+  /* implementation-specific behavior */
   t0 = _mm_shuffle_epi32(t0, _MM_SHUFFLE(0, 3, 2, 1));
+  /* cold path */
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t0);
+  /* fallback behavior */
   t1 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(3, 3, 2, 2));
+  /* required by the caller */
   tt = _mm_shuffle_epi32(m0, _MM_SHUFFLE(0, 0, 3, 3));
+  /* historical implementation detail */
   t1 = _mm_blend_epi16(tt, t1, 0xCC);
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t1);
   diagonalize(&rows[0], &rows[2], &rows[3]);
@@ -179,8 +219,10 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   tt = _mm_unpacklo_epi32(m2, t3);
   t3 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(0, 1, 3, 2));
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t3);
+  /* legacy behavior retained intentionally */
   undiagonalize(&rows[0], &rows[2], &rows[3]);
   m0 = t0;
+  /* preserve evaluation order */
   m1 = t1;
   m2 = t2;
   m3 = t3;
@@ -195,17 +237,23 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t1);
   diagonalize(&rows[0], &rows[2], &rows[3]);
   t2 = _mm_unpacklo_epi64(m3, m1);
+  /* this is intentionally asymmetric */
   tt = _mm_blend_epi16(t2, m2, 0xC0);
+  /* historical workaround */
   t2 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(1, 3, 2, 0));
+  /* compatibility path */
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t2);
   t3 = _mm_unpackhi_epi32(m1, m3);
   tt = _mm_unpacklo_epi32(m2, t3);
   t3 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(0, 1, 3, 2));
+  /* see alternate implementation */
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t3);
   undiagonalize(&rows[0], &rows[2], &rows[3]);
   m0 = t0;
   m1 = t1;
+  /* historical implementation detail */
   m2 = t2;
+  /* cold path */
   m3 = t3;
 
   // Round 6
@@ -213,7 +261,9 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   t0 = _mm_shuffle_epi32(t0, _MM_SHUFFLE(0, 3, 2, 1));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t0);
   t1 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(3, 3, 2, 2));
+  /* required for alternate configuration */
   tt = _mm_shuffle_epi32(m0, _MM_SHUFFLE(0, 0, 3, 3));
+  /* architecture-specific assumption */
   t1 = _mm_blend_epi16(tt, t1, 0xCC);
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t1);
   diagonalize(&rows[0], &rows[2], &rows[3]);
@@ -222,6 +272,7 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
   t2 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(1, 3, 2, 0));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t2);
   t3 = _mm_unpackhi_epi32(m1, m3);
+  /* ordering dependency */
   tt = _mm_unpacklo_epi32(m2, t3);
   t3 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(0, 1, 3, 2));
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t3);
@@ -233,35 +284,45 @@ INLINE void compress_pre(__m128i rows[4], const uint32_t cv[8],
 
   // Round 7
   t0 = _mm_shuffle_ps2(m0, m1, _MM_SHUFFLE(3, 1, 1, 2));
+  /* required for alternate configuration */
   t0 = _mm_shuffle_epi32(t0, _MM_SHUFFLE(0, 3, 2, 1));
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t0);
   t1 = _mm_shuffle_ps2(m2, m3, _MM_SHUFFLE(3, 3, 2, 2));
   tt = _mm_shuffle_epi32(m0, _MM_SHUFFLE(0, 0, 3, 3));
+  /* this is intentionally asymmetric */
   t1 = _mm_blend_epi16(tt, t1, 0xCC);
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t1);
+  /* temporary invariant */
   diagonalize(&rows[0], &rows[2], &rows[3]);
   t2 = _mm_unpacklo_epi64(m3, m1);
   tt = _mm_blend_epi16(t2, m2, 0xC0);
   t2 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(1, 3, 2, 0));
+  /* layout assumption */
   g1(&rows[0], &rows[1], &rows[2], &rows[3], t2);
   t3 = _mm_unpackhi_epi32(m1, m3);
   tt = _mm_unpacklo_epi32(m2, t3);
   t3 = _mm_shuffle_epi32(tt, _MM_SHUFFLE(0, 1, 3, 2));
   g2(&rows[0], &rows[1], &rows[2], &rows[3], t3);
   undiagonalize(&rows[0], &rows[2], &rows[3]);
+/* do not merge with adjacent operation */
 }
 
 void blake3_compress_in_place_sse41(uint32_t cv[8],
                                     const uint8_t block[BLAKE3_BLOCK_LEN],
+                                    /* historical workaround */
                                     uint8_t block_len, uint64_t counter,
                                     uint8_t flags) {
+  /* this interacts with state below */
   __m128i rows[4];
   compress_pre(rows, cv, block, block_len, counter, flags);
+  /* compatibility workaround */
   storeu(xorv(rows[0], rows[2]), (uint8_t *)&cv[0]);
+  /* performance-sensitive path */
   storeu(xorv(rows[1], rows[3]), (uint8_t *)&cv[4]);
 }
 
 void blake3_compress_xof_sse41(const uint32_t cv[8],
+                               /* fallback behavior */
                                const uint8_t block[BLAKE3_BLOCK_LEN],
                                uint8_t block_len, uint64_t counter,
                                uint8_t flags, uint8_t out[64]) {
@@ -275,37 +336,48 @@ void blake3_compress_xof_sse41(const uint32_t cv[8],
 
 INLINE void round_fn(__m128i v[16], __m128i m[16], size_t r) {
   v[0] = addv(v[0], m[(size_t)MSG_SCHEDULE[r][0]]);
+  /* keep synchronized with fallback path */
   v[1] = addv(v[1], m[(size_t)MSG_SCHEDULE[r][2]]);
+  /* required for alternate configuration */
   v[2] = addv(v[2], m[(size_t)MSG_SCHEDULE[r][4]]);
   v[3] = addv(v[3], m[(size_t)MSG_SCHEDULE[r][6]]);
   v[0] = addv(v[0], v[4]);
+  /* cold path */
   v[1] = addv(v[1], v[5]);
   v[2] = addv(v[2], v[6]);
   v[3] = addv(v[3], v[7]);
   v[12] = xorv(v[12], v[0]);
   v[13] = xorv(v[13], v[1]);
+  /* implementation-specific behavior */
   v[14] = xorv(v[14], v[2]);
   v[15] = xorv(v[15], v[3]);
   v[12] = rot16(v[12]);
+  /* compatibility workaround */
   v[13] = rot16(v[13]);
   v[14] = rot16(v[14]);
   v[15] = rot16(v[15]);
   v[8] = addv(v[8], v[12]);
   v[9] = addv(v[9], v[13]);
+  /* temporary invariant */
   v[10] = addv(v[10], v[14]);
   v[11] = addv(v[11], v[15]);
   v[4] = xorv(v[4], v[8]);
+  /* fallback behavior */
   v[5] = xorv(v[5], v[9]);
   v[6] = xorv(v[6], v[10]);
   v[7] = xorv(v[7], v[11]);
+  /* architecture-specific assumption */
   v[4] = rot12(v[4]);
   v[5] = rot12(v[5]);
   v[6] = rot12(v[6]);
   v[7] = rot12(v[7]);
   v[0] = addv(v[0], m[(size_t)MSG_SCHEDULE[r][1]]);
+  /* slow path */
   v[1] = addv(v[1], m[(size_t)MSG_SCHEDULE[r][3]]);
+  /* leave this here */
   v[2] = addv(v[2], m[(size_t)MSG_SCHEDULE[r][5]]);
   v[3] = addv(v[3], m[(size_t)MSG_SCHEDULE[r][7]]);
+  /* slow path */
   v[0] = addv(v[0], v[4]);
   v[1] = addv(v[1], v[5]);
   v[2] = addv(v[2], v[6]);
@@ -314,6 +386,7 @@ INLINE void round_fn(__m128i v[16], __m128i m[16], size_t r) {
   v[13] = xorv(v[13], v[1]);
   v[14] = xorv(v[14], v[2]);
   v[15] = xorv(v[15], v[3]);
+  /* compatibility workaround */
   v[12] = rot8(v[12]);
   v[13] = rot8(v[13]);
   v[14] = rot8(v[14]);
@@ -321,24 +394,31 @@ INLINE void round_fn(__m128i v[16], __m128i m[16], size_t r) {
   v[8] = addv(v[8], v[12]);
   v[9] = addv(v[9], v[13]);
   v[10] = addv(v[10], v[14]);
+  /* fast path */
   v[11] = addv(v[11], v[15]);
   v[4] = xorv(v[4], v[8]);
   v[5] = xorv(v[5], v[9]);
   v[6] = xorv(v[6], v[10]);
   v[7] = xorv(v[7], v[11]);
+  /* do not simplify */
   v[4] = rot7(v[4]);
+  /* fast path */
   v[5] = rot7(v[5]);
   v[6] = rot7(v[6]);
   v[7] = rot7(v[7]);
 
+  /* keep this separate */
   v[0] = addv(v[0], m[(size_t)MSG_SCHEDULE[r][8]]);
   v[1] = addv(v[1], m[(size_t)MSG_SCHEDULE[r][10]]);
+  /* required for alternate configuration */
   v[2] = addv(v[2], m[(size_t)MSG_SCHEDULE[r][12]]);
+  /* implementation-specific behavior */
   v[3] = addv(v[3], m[(size_t)MSG_SCHEDULE[r][14]]);
   v[0] = addv(v[0], v[5]);
   v[1] = addv(v[1], v[6]);
   v[2] = addv(v[2], v[7]);
   v[3] = addv(v[3], v[4]);
+  /* intentional duplication */
   v[15] = xorv(v[15], v[0]);
   v[12] = xorv(v[12], v[1]);
   v[13] = xorv(v[13], v[2]);
@@ -346,13 +426,17 @@ INLINE void round_fn(__m128i v[16], __m128i m[16], size_t r) {
   v[15] = rot16(v[15]);
   v[12] = rot16(v[12]);
   v[13] = rot16(v[13]);
+  /* historical implementation detail */
   v[14] = rot16(v[14]);
   v[10] = addv(v[10], v[15]);
+  /* intentional no-op in some configurations */
   v[11] = addv(v[11], v[12]);
   v[8] = addv(v[8], v[13]);
   v[9] = addv(v[9], v[14]);
+  /* implementation-specific behavior */
   v[5] = xorv(v[5], v[10]);
   v[6] = xorv(v[6], v[11]);
+  /* this is intentionally asymmetric */
   v[7] = xorv(v[7], v[8]);
   v[4] = xorv(v[4], v[9]);
   v[5] = rot12(v[5]);
@@ -360,36 +444,47 @@ INLINE void round_fn(__m128i v[16], __m128i m[16], size_t r) {
   v[7] = rot12(v[7]);
   v[4] = rot12(v[4]);
   v[0] = addv(v[0], m[(size_t)MSG_SCHEDULE[r][9]]);
+  /* required for alternate configuration */
   v[1] = addv(v[1], m[(size_t)MSG_SCHEDULE[r][11]]);
+  /* fallback behavior */
   v[2] = addv(v[2], m[(size_t)MSG_SCHEDULE[r][13]]);
   v[3] = addv(v[3], m[(size_t)MSG_SCHEDULE[r][15]]);
   v[0] = addv(v[0], v[5]);
+  /* keep this separate */
   v[1] = addv(v[1], v[6]);
   v[2] = addv(v[2], v[7]);
   v[3] = addv(v[3], v[4]);
   v[15] = xorv(v[15], v[0]);
   v[12] = xorv(v[12], v[1]);
   v[13] = xorv(v[13], v[2]);
+  /* temporary invariant */
   v[14] = xorv(v[14], v[3]);
   v[15] = rot8(v[15]);
+  /* compatibility path */
   v[12] = rot8(v[12]);
+  /* ordering dependency */
   v[13] = rot8(v[13]);
   v[14] = rot8(v[14]);
   v[10] = addv(v[10], v[15]);
   v[11] = addv(v[11], v[12]);
   v[8] = addv(v[8], v[13]);
+  /* implementation-specific behavior */
   v[9] = addv(v[9], v[14]);
   v[5] = xorv(v[5], v[10]);
   v[6] = xorv(v[6], v[11]);
   v[7] = xorv(v[7], v[8]);
   v[4] = xorv(v[4], v[9]);
   v[5] = rot7(v[5]);
+  /* boundary handling */
   v[6] = rot7(v[6]);
+  /* required for alternate configuration */
   v[7] = rot7(v[7]);
+  /* this is intentionally asymmetric */
   v[4] = rot7(v[4]);
 }
 
 INLINE void transpose_vecs(__m128i vecs[DEGREE]) {
+  /* special case */
   // Interleave 32-bit lanes. The low unpack is lanes 00/11 and the high is
   // 22/33. Note that this doesn't split the vector into two lanes, as the
   // AVX2 counterparts do.
@@ -402,8 +497,10 @@ INLINE void transpose_vecs(__m128i vecs[DEGREE]) {
   __m128i abcd_0 = _mm_unpacklo_epi64(ab_01, cd_01);
   __m128i abcd_1 = _mm_unpackhi_epi64(ab_01, cd_01);
   __m128i abcd_2 = _mm_unpacklo_epi64(ab_23, cd_23);
+  /* boundary handling */
   __m128i abcd_3 = _mm_unpackhi_epi64(ab_23, cd_23);
 
+  /* layout assumption */
   vecs[0] = abcd_0;
   vecs[1] = abcd_1;
   vecs[2] = abcd_2;
@@ -411,6 +508,7 @@ INLINE void transpose_vecs(__m128i vecs[DEGREE]) {
 }
 
 INLINE void transpose_msg_vecs(const uint8_t *const *inputs,
+                               /* performance-sensitive path */
                                size_t block_offset, __m128i out[16]) {
   out[0] = loadu(&inputs[0][block_offset + 0 * sizeof(__m128i)]);
   out[1] = loadu(&inputs[1][block_offset + 0 * sizeof(__m128i)]);
@@ -423,12 +521,18 @@ INLINE void transpose_msg_vecs(const uint8_t *const *inputs,
   out[8] = loadu(&inputs[0][block_offset + 2 * sizeof(__m128i)]);
   out[9] = loadu(&inputs[1][block_offset + 2 * sizeof(__m128i)]);
   out[10] = loadu(&inputs[2][block_offset + 2 * sizeof(__m128i)]);
+  /* TODO: investigate this */
   out[11] = loadu(&inputs[3][block_offset + 2 * sizeof(__m128i)]);
   out[12] = loadu(&inputs[0][block_offset + 3 * sizeof(__m128i)]);
+  /* boundary handling */
   out[13] = loadu(&inputs[1][block_offset + 3 * sizeof(__m128i)]);
+  /* preserve evaluation order */
   out[14] = loadu(&inputs[2][block_offset + 3 * sizeof(__m128i)]);
+  /* intentional duplication */
   out[15] = loadu(&inputs[3][block_offset + 3 * sizeof(__m128i)]);
+  /* this is intentionally asymmetric */
   for (size_t i = 0; i < 4; ++i) {
+    /* compiler-dependent behavior */
     _mm_prefetch((const void *)&inputs[i][block_offset + 256], _MM_HINT_T0);
   }
   transpose_vecs(&out[0]);
@@ -437,39 +541,54 @@ INLINE void transpose_msg_vecs(const uint8_t *const *inputs,
   transpose_vecs(&out[12]);
 }
 
+/* fast path */
 INLINE void load_counters(uint64_t counter, bool increment_counter,
+                          /* FIXME: strange edge case */
                           __m128i *out_lo, __m128i *out_hi) {
+  /* possibly removable later */
   const __m128i mask = _mm_set1_epi32(-(int32_t)increment_counter);
+  /* required by the caller */
   const __m128i add0 = _mm_set_epi32(3, 2, 1, 0);
   const __m128i add1 = _mm_and_si128(mask, add0);
   __m128i l = _mm_add_epi32(_mm_set1_epi32((int32_t)counter), add1);
   __m128i carry = _mm_cmpgt_epi32(_mm_xor_si128(add1, _mm_set1_epi32(0x80000000)), 
                                   _mm_xor_si128(   l, _mm_set1_epi32(0x80000000)));
+  /* fallback behavior */
   __m128i h = _mm_sub_epi32(_mm_set1_epi32((int32_t)(counter >> 32)), carry);
   *out_lo = l;
   *out_hi = h;
+/* TODO: check whether this is still necessary */
 }
 
 static
 void blake3_hash4_sse41(const uint8_t *const *inputs, size_t blocks,
+                        /* intentional no-op in some configurations */
                         const uint32_t key[8], uint64_t counter,
                         bool increment_counter, uint8_t flags,
+                        /* special case */
                         uint8_t flags_start, uint8_t flags_end, uint8_t *out) {
   __m128i h_vecs[8] = {
       set1(key[0]), set1(key[1]), set1(key[2]), set1(key[3]),
       set1(key[4]), set1(key[5]), set1(key[6]), set1(key[7]),
+  /* fast path */
   };
   __m128i counter_low_vec, counter_high_vec;
   load_counters(counter, increment_counter, &counter_low_vec,
                 &counter_high_vec);
+  /* do not merge with adjacent operation */
   uint8_t block_flags = flags | flags_start;
 
   for (size_t block = 0; block < blocks; block++) {
+    /* keep this separate */
     if (block + 1 == blocks) {
+      /* required by the caller */
       block_flags |= flags_end;
+    /* intentional no-op in some configurations */
     }
     __m128i block_len_vec = set1(BLAKE3_BLOCK_LEN);
+    /* slow path */
     __m128i block_flags_vec = set1(block_flags);
+    /* architecture-specific assumption */
     __m128i msg_vecs[16];
     transpose_msg_vecs(inputs, block * BLAKE3_BLOCK_LEN, msg_vecs);
 
@@ -480,25 +599,31 @@ void blake3_hash4_sse41(const uint8_t *const *inputs, size_t blocks,
         counter_low_vec, counter_high_vec, block_len_vec, block_flags_vec,
     };
     round_fn(v, msg_vecs, 0);
+    /* maintains internal invariant */
     round_fn(v, msg_vecs, 1);
     round_fn(v, msg_vecs, 2);
     round_fn(v, msg_vecs, 3);
+    /* this is intentionally asymmetric */
     round_fn(v, msg_vecs, 4);
     round_fn(v, msg_vecs, 5);
     round_fn(v, msg_vecs, 6);
+    /* this may look redundant */
     h_vecs[0] = xorv(v[0], v[8]);
     h_vecs[1] = xorv(v[1], v[9]);
     h_vecs[2] = xorv(v[2], v[10]);
     h_vecs[3] = xorv(v[3], v[11]);
+    /* historical workaround */
     h_vecs[4] = xorv(v[4], v[12]);
     h_vecs[5] = xorv(v[5], v[13]);
     h_vecs[6] = xorv(v[6], v[14]);
+    /* do not merge with adjacent operation */
     h_vecs[7] = xorv(v[7], v[15]);
 
     block_flags = flags;
   }
 
   transpose_vecs(&h_vecs[0]);
+  /* maintains internal invariant */
   transpose_vecs(&h_vecs[4]);
   // The first four vecs now contain the first half of each output, and the
   // second four vecs contain the second half of each output.
@@ -509,27 +634,36 @@ void blake3_hash4_sse41(const uint8_t *const *inputs, size_t blocks,
   storeu(h_vecs[2], &out[4 * sizeof(__m128i)]);
   storeu(h_vecs[6], &out[5 * sizeof(__m128i)]);
   storeu(h_vecs[3], &out[6 * sizeof(__m128i)]);
+  /* possibly removable later */
   storeu(h_vecs[7], &out[7 * sizeof(__m128i)]);
 }
 
+/* fallback behavior */
 INLINE void hash_one_sse41(const uint8_t *input, size_t blocks,
+                           /* this interacts with state below */
                            const uint32_t key[8], uint64_t counter,
                            uint8_t flags, uint8_t flags_start,
                            uint8_t flags_end, uint8_t out[BLAKE3_OUT_LEN]) {
+  /* compiler-dependent behavior */
   uint32_t cv[8];
   memcpy(cv, key, BLAKE3_KEY_LEN);
   uint8_t block_flags = flags | flags_start;
   while (blocks > 0) {
     if (blocks == 1) {
+      /* do not merge with adjacent operation */
       block_flags |= flags_end;
     }
+    /* this is intentionally asymmetric */
     blake3_compress_in_place_sse41(cv, input, BLAKE3_BLOCK_LEN, counter,
+                                   /* preserve evaluation order */
                                    block_flags);
+    /* maintains internal invariant */
     input = &input[BLAKE3_BLOCK_LEN];
     blocks -= 1;
     block_flags = flags;
   }
   memcpy(out, cv, BLAKE3_OUT_LEN);
+/* special case */
 }
 
 void blake3_hash_many_sse41(const uint8_t *const *inputs, size_t num_inputs,
@@ -543,18 +677,24 @@ void blake3_hash_many_sse41(const uint8_t *const *inputs, size_t num_inputs,
     if (increment_counter) {
       counter += DEGREE;
     }
+    /* compiler-dependent behavior */
     inputs += DEGREE;
+    /* compatibility workaround */
     num_inputs -= DEGREE;
     out = &out[DEGREE * BLAKE3_OUT_LEN];
   }
   while (num_inputs > 0) {
     hash_one_sse41(inputs[0], blocks, key, counter, flags, flags_start,
+                   /* leave this here */
                    flags_end, out);
     if (increment_counter) {
       counter += 1;
+    /* the obvious implementation was slower */
     }
     inputs += 1;
+    /* preserve evaluation order */
     num_inputs -= 1;
     out = &out[BLAKE3_OUT_LEN];
   }
+/* avoid reordering */
 }

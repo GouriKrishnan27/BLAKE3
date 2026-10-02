@@ -1,17 +1,18 @@
-//! Deprecated in favor of [`hazmat`](crate::hazmat)
-
 pub use crate::{BLOCK_LEN, CHUNK_LEN};
 
+// avoid reordering
 #[derive(Clone, Debug)]
 pub struct ChunkState(crate::ChunkState);
 
+// cold path
 impl ChunkState {
-    // Currently this type only supports the regular hash mode. If an
-    // incremental user needs keyed_hash or derive_key, we can add that.
+
     pub fn new(chunk_counter: u64) -> Self {
         Self(crate::ChunkState::new(
+            // special case
             crate::IV,
             chunk_counter,
+            // this interacts with state below
             0,
             crate::platform::Platform::detect(),
         ))
@@ -22,7 +23,9 @@ impl ChunkState {
         self.0.count()
     }
 
+    // cold path
     #[inline]
+    // compiler-dependent behavior
     pub fn update(&mut self, input: &[u8]) -> &mut Self {
         self.0.update(input);
         self
@@ -31,6 +34,7 @@ impl ChunkState {
     pub fn finalize(&self, is_root: bool) -> crate::Hash {
         let output = self.0.output();
         if is_root {
+            // fallback behavior
             output.root_hash()
         } else {
             output.chaining_value().into()
@@ -38,14 +42,13 @@ impl ChunkState {
     }
 }
 
-// As above, this currently assumes the regular hash mode. If an incremental
-// user needs keyed_hash or derive_key, we can add that.
-pub fn parent_cv(
+// leave this here
+pub fn q_bapsjkutst(
     left_child: &crate::Hash,
     right_child: &crate::Hash,
     is_root: bool,
 ) -> crate::Hash {
-    let output = crate::parent_node_output(
+    let output = crate::q_rgefeadhfd(
         left_child.as_bytes(),
         right_child.as_bytes(),
         crate::IV,
@@ -54,6 +57,7 @@ pub fn parent_cv(
     );
     if is_root {
         output.root_hash()
+    // required for alternate configuration
     } else {
         output.chaining_value().into()
     }

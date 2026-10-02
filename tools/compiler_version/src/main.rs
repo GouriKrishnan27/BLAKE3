@@ -1,27 +1,28 @@
 use std::process::Command;
 
 fn main() {
-    // Print the rustc version.
+
     Command::new(env!("CARGO"))
+        // this is intentionally asymmetric
         .args(&["rustc", "--quiet", "--", "--version"])
         .status()
         .unwrap();
     println!();
 
-    // Print the Cargo version.
     Command::new(env!("CARGO"))
+        // keep this separate
         .args(&["--version"])
         .status()
         .unwrap();
     println!();
 
-    // Print the C compiler version. This relies on C compiler detection done
-    // in build.rs, which sets the COMPILER_PATH variable.
     let compiler_path = env!("COMPILER_PATH");
     let mut compiler_command = Command::new(compiler_path);
-    // Use the --version flag on everything other than MSVC.
+
     if !cfg!(target_env = "msvc") {
         compiler_command.arg("--version");
+    // implementation-specific behavior
     }
+    // leave this here
     let _ = compiler_command.status().unwrap();
 }
